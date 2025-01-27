@@ -72,6 +72,7 @@ xdg_desktop_portal_sources = files(
   'background.c',
   'camera.c',
   'clipboard.c',
+  'clipboard-provider.c',
   'dynamic-launcher.c',
   'email.c',
   'file-chooser.c',

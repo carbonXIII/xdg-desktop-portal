@@ -30,6 +30,7 @@
 #include "xdp-impl-dbus.h"
 #include "xdp-session-persistence.h"
 #include "xdp-utils.h"
+#include "clipboard-provider.h"
 
 #include <gio/gunixfdlist.h>
 #include <stdint.h>
@@ -54,6 +55,7 @@ static RemoteDesktop *remote_desktop;
 
 GType remote_desktop_get_type (void) G_GNUC_CONST;
 static void remote_desktop_iface_init (XdpDbusRemoteDesktopIface *iface);
+static void clipboard_provider_iface_init(ClipboardProviderInterface *iface);
 
 static GQuark quark_request_session;
 
@@ -107,7 +109,10 @@ typedef struct _RemoteDesktopSessionClass
   XdpSessionClass parent_class;
 } RemoteDesktopSessionClass;
 
-G_DEFINE_TYPE (RemoteDesktopSession, remote_desktop_session, xdp_session_get_type ())
+G_DEFINE_TYPE_WITH_CODE (RemoteDesktopSession, remote_desktop_session,
+                         xdp_session_get_type (),
+                         G_IMPLEMENT_INTERFACE (CLIPBOARD_TYPE_PROVIDER,
+                                                clipboard_provider_iface_init))
 
 gboolean
 remote_desktop_session_can_select_sources (RemoteDesktopSession *session)
@@ -145,9 +150,11 @@ remote_desktop_session_can_select_devices (RemoteDesktopSession *session)
   g_assert_not_reached ();
 }
 
-gboolean
-remote_desktop_session_can_request_clipboard (RemoteDesktopSession *session)
+static gboolean
+clipboard_can_request (ClipboardProvider *provider)
 {
+  RemoteDesktopSession *session = REMOTE_DESKTOP_SESSION(provider);
+
   if (session->clipboard_requested)
     return FALSE;
 
@@ -178,16 +185,25 @@ remote_desktop_session_sources_selected (RemoteDesktopSession *session)
   session->sources_selected = TRUE;
 }
 
-gboolean
-remote_desktop_session_is_clipboard_enabled (RemoteDesktopSession *session)
+static gboolean
+clipboard_is_enabled (ClipboardProvider *provider)
 {
+  RemoteDesktopSession *session = REMOTE_DESKTOP_SESSION(provider);
   return session->clipboard_enabled;
 }
 
-void
-remote_desktop_session_clipboard_requested (RemoteDesktopSession *session)
+static void
+clipboard_requested (ClipboardProvider *provider)
 {
+  RemoteDesktopSession *session = REMOTE_DESKTOP_SESSION(provider);
   session->clipboard_requested = TRUE;
+}
+
+static void
+clipboard_provider_iface_init(ClipboardProviderInterface *iface) {
+  iface->can_request = clipboard_can_request;
+  iface->is_enabled = clipboard_is_enabled;
+  iface->requested = clipboard_requested;
 }
 
 static RemoteDesktopSession *
@@ -1675,4 +1691,3 @@ remote_desktop_session_class_init (RemoteDesktopSessionClass *klass)
   quark_request_session =
     g_quark_from_static_string ("-xdp-request-remote-desktop-session");
 }
-

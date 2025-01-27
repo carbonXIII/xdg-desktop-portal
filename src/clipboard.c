@@ -23,7 +23,7 @@
 #include <stdint.h>
 
 #include "clipboard.h"
-#include "remote-desktop.h"
+#include "clipboard-provider.h"
 #include "xdp-session.h"
 #include "xdp-dbus.h"
 #include "xdp-impl-dbus.h"
@@ -66,7 +66,7 @@ handle_request_clipboard (XdpDbusClipboard *object,
 {
   XdpCall *call = xdp_call_from_invocation (invocation);
   XdpSession *session;
-  RemoteDesktopSession *remote_desktop_session;
+  ClipboardProvider *clipboard_provider;
 
   session = xdp_session_from_call (arg_session_handle, call);
   if (!session)
@@ -80,7 +80,7 @@ handle_request_clipboard (XdpDbusClipboard *object,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  if (!IS_REMOTE_DESKTOP_SESSION (session))
+  if (!CLIPBOARD_IS_PROVIDER (session))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -88,9 +88,9 @@ handle_request_clipboard (XdpDbusClipboard *object,
                                              "Invalid session type");
       return G_DBUS_METHOD_INVOCATION_HANDLED;
     }
-  remote_desktop_session = REMOTE_DESKTOP_SESSION (session);
+  clipboard_provider = CLIPBOARD_PROVIDER (session);
 
-  if (!remote_desktop_session_can_request_clipboard (remote_desktop_session))
+  if (!clipboard_provider_can_request (clipboard_provider))
     {
       g_dbus_method_invocation_return_error (
         invocation, G_DBUS_ERROR, G_DBUS_ERROR_FAILED, "Invalid state");
@@ -101,7 +101,7 @@ handle_request_clipboard (XdpDbusClipboard *object,
     impl, session->id, arg_options, NULL, NULL, NULL);
 
   xdp_dbus_clipboard_complete_request_clipboard (object, invocation);
-  remote_desktop_session_clipboard_requested (remote_desktop_session);
+  clipboard_provider_requested (clipboard_provider);
 
   return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
@@ -131,7 +131,7 @@ handle_set_selection (XdpDbusClipboard *object,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  if (!IS_REMOTE_DESKTOP_SESSION (session))
+  if (!CLIPBOARD_IS_PROVIDER (session))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -139,8 +139,8 @@ handle_set_selection (XdpDbusClipboard *object,
                                              "Invalid session type");
       return G_DBUS_METHOD_INVOCATION_HANDLED;
     }
-  else if (!remote_desktop_session_is_clipboard_enabled (
-             REMOTE_DESKTOP_SESSION (session)))
+  else if (!clipboard_provider_is_enabled (
+             CLIPBOARD_PROVIDER (session)))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -250,7 +250,7 @@ handle_selection_write (XdpDbusClipboard *object,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  if (!IS_REMOTE_DESKTOP_SESSION (session))
+  if (!CLIPBOARD_IS_PROVIDER (session))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -258,8 +258,8 @@ handle_selection_write (XdpDbusClipboard *object,
                                              "Invalid session type");
       return G_DBUS_METHOD_INVOCATION_HANDLED;
     }
-  else if (!remote_desktop_session_is_clipboard_enabled (
-             REMOTE_DESKTOP_SESSION (session)))
+  else if (!clipboard_provider_is_enabled (
+             CLIPBOARD_PROVIDER (session)))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -301,7 +301,7 @@ handle_selection_write_done (XdpDbusClipboard *object,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  if (!IS_REMOTE_DESKTOP_SESSION (session))
+  if (!CLIPBOARD_IS_PROVIDER (session))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -309,8 +309,8 @@ handle_selection_write_done (XdpDbusClipboard *object,
                                              "Invalid session type");
       return G_DBUS_METHOD_INVOCATION_HANDLED;
     }
-  else if (!remote_desktop_session_is_clipboard_enabled (
-             REMOTE_DESKTOP_SESSION (session)))
+  else if (!clipboard_provider_is_enabled (
+             CLIPBOARD_PROVIDER (session)))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -405,7 +405,7 @@ handle_selection_read (XdpDbusClipboard *object,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  if (!IS_REMOTE_DESKTOP_SESSION (session))
+  if (!CLIPBOARD_IS_PROVIDER (session))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -413,8 +413,8 @@ handle_selection_read (XdpDbusClipboard *object,
                                              "Invalid session type");
       return G_DBUS_METHOD_INVOCATION_HANDLED;
     }
-  else if (!remote_desktop_session_is_clipboard_enabled (
-              REMOTE_DESKTOP_SESSION (session)))
+  else if (!clipboard_provider_is_enabled (
+              CLIPBOARD_PROVIDER (session)))
     {
       g_dbus_method_invocation_return_error (invocation,
                                              G_DBUS_ERROR,
@@ -476,10 +476,10 @@ selection_transfer_cb (XdpDbusImplClipboard *impl,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  RemoteDesktopSession *remote_desktop_session = REMOTE_DESKTOP_SESSION (session);
+  ClipboardProvider *clipboard_provider = CLIPBOARD_PROVIDER (session);
 
-  if (remote_desktop_session &&
-      remote_desktop_session_is_clipboard_enabled (remote_desktop_session) &&
+  if (clipboard_provider &&
+      clipboard_provider_is_enabled (clipboard_provider) &&
       !session->closed)
     {
       g_dbus_connection_emit_signal (
@@ -512,10 +512,10 @@ selection_owner_changed_cb (XdpDbusImplClipboard *impl,
 
   SESSION_AUTOLOCK_UNREF (session);
 
-  RemoteDesktopSession *remote_desktop_session = REMOTE_DESKTOP_SESSION (session);
+  ClipboardProvider *clipboard_provider = CLIPBOARD_PROVIDER (session);
 
-  if (remote_desktop_session &&
-      remote_desktop_session_is_clipboard_enabled (remote_desktop_session) &&
+  if (clipboard_provider &&
+      clipboard_provider_is_enabled (clipboard_provider) &&
       !session->closed)
     {
       g_dbus_connection_emit_signal (
