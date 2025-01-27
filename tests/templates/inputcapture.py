@@ -240,6 +240,8 @@ def Enable(self, session_handle, app_id, options):
 
             GLib.timeout_add(self.deactivated_delay, deactivated)
 
+        return (0, {})
+
     except Exception as e:
         logger.critical(e)
         return (2, {})

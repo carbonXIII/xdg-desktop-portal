@@ -26,6 +26,7 @@
 
 #include "xdp-session.h"
 #include "input-capture.h"
+#include "clipboard-provider.h"
 #include "xdp-request.h"
 #include "xdp-dbus.h"
 #include "xdp-impl-dbus.h"
@@ -54,6 +55,7 @@ static GQuark quark_request_session;
 
 GType input_capture_get_type (void);
 static void input_capture_iface_init (XdpDbusInputCaptureIface *iface);
+static void clipboard_provider_iface_init (ClipboardProviderInterface *iface);
 
 G_DEFINE_TYPE_WITH_CODE (InputCapture, input_capture, XDP_DBUS_TYPE_INPUT_CAPTURE_SKELETON,
                          G_IMPLEMENT_INTERFACE (XDP_DBUS_TYPE_INPUT_CAPTURE,
@@ -68,11 +70,26 @@ typedef enum _InputCaptureSessionState
   INPUT_CAPTURE_SESSION_STATE_CLOSED
 } InputCaptureSessionState;
 
+typedef enum _InputCaptureCapabilities
+{
+  INPUT_CAPTURE_CAPABILITIES_KEYBOARD = 1,
+  INPUT_CAPTURE_CAPABILITIES_POINTER = 2,
+  INPUT_CAPTURE_CAPABILITIES_TOUCHSCREEN = 4,
+  INPUT_CAPTURE_CAPABILITIES_CLIPBOARD = 8,
+  INPUT_CAPTURE_CAPABILITIES_MASK = 15,
+} InputCaptureCapabilities;
+
 typedef struct _InputCaptureSession
 {
   XdpSession parent;
 
   InputCaptureSessionState state;
+
+  gboolean clipboard_capable;
+
+  gboolean clipboard_requested;
+
+  gboolean clipboard_enabled;
 } InputCaptureSession;
 
 typedef struct _InputCaptureSessionClass
@@ -82,7 +99,10 @@ typedef struct _InputCaptureSessionClass
 
 GType input_capture_session_get_type (void);
 
-G_DEFINE_TYPE (InputCaptureSession, input_capture_session, xdp_session_get_type ())
+G_DEFINE_TYPE_WITH_CODE (InputCaptureSession, input_capture_session,
+                         xdp_session_get_type (),
+                         G_IMPLEMENT_INTERFACE (CLIPBOARD_TYPE_PROVIDER,
+                                                clipboard_provider_iface_init))
 
 G_GNUC_UNUSED static inline InputCaptureSession *
 INPUT_CAPTURE_SESSION (gpointer ptr)
@@ -128,6 +148,16 @@ input_capture_session_new (GVariant    *options,
 }
 
 static void
+set_capabilities (InputCaptureSession *input_capture_session,
+                  InputCaptureCapabilities capabilities) {
+  if (xdp_dbus_impl_input_capture_get_version (impl) >= 2) {
+    if((capabilities & INPUT_CAPTURE_CAPABILITIES_CLIPBOARD) == INPUT_CAPTURE_CAPABILITIES_CLIPBOARD) {
+      input_capture_session->clipboard_capable = TRUE;
+    }
+  }
+}
+
+static void
 create_session_done (GObject      *source_object,
                      GAsyncResult *res,
                      gpointer      data)
@@ -141,12 +171,15 @@ create_session_done (GObject      *source_object,
   gboolean should_close_session;
   uint32_t capabilities = 0;
   uint32_t response = 2;
+  InputCaptureSession *input_capture_session;
 
   REQUEST_AUTOLOCK (request);
 
   session = g_object_get_qdata (G_OBJECT (request), quark_request_session);
   SESSION_AUTOLOCK_UNREF (g_object_ref (session));
   g_object_set_qdata (G_OBJECT (request), quark_request_session, NULL);
+
+  input_capture_session = INPUT_CAPTURE_SESSION (session);
 
   if (!xdp_dbus_impl_input_capture_call_create_session_finish (impl,
                                                                &response,
@@ -181,6 +214,8 @@ create_session_done (GObject      *source_object,
       should_close_session = FALSE;
       xdp_session_register (session);
 
+      set_capabilities (input_capture_session, capabilities);
+
       g_variant_builder_add (&results_builder, "{sv}",
                             "capabilities", g_variant_new_uint32 (capabilities));
       g_variant_builder_add (&results_builder, "{sv}",
@@ -212,7 +247,7 @@ validate_capabilities (const char  *key,
 {
   uint32_t types = g_variant_get_uint32 (value);
 
-  if ((types & ~(1 | 2 | 4 | 8)) != 0)
+  if ((types & ~INPUT_CAPTURE_CAPABILITIES_MASK) != 0)
     {
       g_set_error (error, XDG_DESKTOP_PORTAL_ERROR, XDG_DESKTOP_PORTAL_ERROR_INVALID_ARGUMENT,
                    "Unsupported capability: %x", types & ~(1 | 2 | 4 | 8));
@@ -322,7 +357,7 @@ get_zones_done (GObject      *source_object,
   {
       g_dbus_error_strip_remote_error (error);
       g_warning ("A backend call failed: %s", error->message);
-    }
+  }
 
   should_close_session = !request->exported || response != 0;
 
@@ -607,6 +642,20 @@ handle_set_pointer_barriers (XdpDbusInputCapture   *object,
   return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
 
+static gboolean
+process_results (InputCaptureSession *input_capture_session,
+                 GVariant **in_out_results,
+                 GError **error) {
+  GVariant *results = *in_out_results;
+  gboolean clipboard_enabled = FALSE;
+
+  if (g_variant_lookup (results, "clipboard_enabled", "b", &clipboard_enabled)) {
+    input_capture_session->clipboard_enabled = clipboard_enabled;
+  }
+
+  return TRUE;
+}
+
 static XdpOptionKey input_capture_enable_options[] = {
 };
 
@@ -619,6 +668,8 @@ handle_enable (XdpDbusInputCapture   *object,
   XdpCall *call = xdp_call_from_invocation (invocation);
   XdpSession *session;
   InputCaptureSession *input_capture_session;
+  guint response;
+  g_autoptr(GVariant) results = NULL;
   g_autoptr(GError) error = NULL;
   g_auto(GVariantBuilder) options_builder =
     G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE_VARDICT);
@@ -675,8 +726,6 @@ handle_enable (XdpDbusInputCapture   *object,
       return G_DBUS_METHOD_INVOCATION_HANDLED;
     }
 
-  input_capture_session->state = INPUT_CAPTURE_SESSION_STATE_ENABLED;
-
   /* Let's be lenient and make Enable() a noop for anything but a disabled
    * session.
    */
@@ -686,24 +735,36 @@ handle_enable (XdpDbusInputCapture   *object,
         g_assert_not_reached ();
       case INPUT_CAPTURE_SESSION_STATE_ENABLED:
       case INPUT_CAPTURE_SESSION_STATE_ACTIVE:
-        break;
+        goto out;
       case INPUT_CAPTURE_SESSION_STATE_DISABLED:
-        input_capture_session->state = INPUT_CAPTURE_SESSION_STATE_ENABLED;
         break;
       case INPUT_CAPTURE_SESSION_STATE_CLOSED: /* ignore, handled above */
         g_assert_not_reached ();
     }
 
-  xdp_dbus_impl_input_capture_call_enable (impl,
-                                           arg_session_handle,
-                                           xdp_app_info_get_id (call->app_info),
-                                           g_variant_builder_end (&options_builder),
-                                           NULL,
-                                           NULL,
-                                           NULL);
+  if(!xdp_dbus_impl_input_capture_call_enable_sync (impl,
+                                                    arg_session_handle,
+                                                    xdp_app_info_get_id (call->app_info),
+                                                    g_variant_builder_end (&options_builder),
+                                                    &response,
+                                                    &results,
+                                                    NULL,
+                                                    &error))
+    {
+      g_warning ("Call to enable failed: %s", error->message);
+      g_dbus_method_invocation_return_gerror(invocation, error);
+      return G_DBUS_METHOD_INVOCATION_HANDLED;
+    }
+  else if(!process_results(input_capture_session, &results, &error))
+    {
+      g_warning ("Failed to process enable results: %s", error->message);
+      g_dbus_method_invocation_return_gerror(invocation, error);
+      return G_DBUS_METHOD_INVOCATION_HANDLED;
+    }
 
+ out:
+  input_capture_session->state = INPUT_CAPTURE_SESSION_STATE_ENABLED;
   xdp_dbus_input_capture_complete_enable (object, invocation);
-
   return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
 
@@ -985,6 +1046,68 @@ handle_connect_to_eis (XdpDbusInputCapture   *object,
 
   xdp_dbus_input_capture_complete_connect_to_eis (object, invocation, out_fd_list, fd);
   return G_DBUS_METHOD_INVOCATION_HANDLED;
+}
+
+static gboolean
+clipboard_can_request (ClipboardProvider *provider)
+{
+  InputCaptureSession *session = INPUT_CAPTURE_SESSION (provider);
+
+  if (session->clipboard_requested)
+    return FALSE;
+
+  if (!session->clipboard_capable)
+    return FALSE;
+
+  switch (session->state)
+    {
+      case INPUT_CAPTURE_SESSION_STATE_INIT:
+        return TRUE;
+      case INPUT_CAPTURE_SESSION_STATE_ENABLED:
+      case INPUT_CAPTURE_SESSION_STATE_ACTIVE:
+      case INPUT_CAPTURE_SESSION_STATE_DISABLED:
+      case INPUT_CAPTURE_SESSION_STATE_CLOSED:
+        return FALSE;
+    }
+
+  g_assert_not_reached ();
+}
+
+static gboolean
+clipboard_is_enabled (ClipboardProvider *provider)
+{
+  InputCaptureSession *session = INPUT_CAPTURE_SESSION (provider);
+
+  if (!session->clipboard_enabled)
+    return FALSE;
+
+  switch (session->state)
+    {
+      case INPUT_CAPTURE_SESSION_STATE_INIT:
+        return FALSE;
+      case INPUT_CAPTURE_SESSION_STATE_ENABLED:
+      case INPUT_CAPTURE_SESSION_STATE_ACTIVE:
+      case INPUT_CAPTURE_SESSION_STATE_DISABLED:
+        return TRUE;
+      case INPUT_CAPTURE_SESSION_STATE_CLOSED:
+        return FALSE;
+    }
+
+  g_assert_not_reached ();
+}
+
+static void
+clipboard_requested (ClipboardProvider *provider)
+{
+  InputCaptureSession *session = INPUT_CAPTURE_SESSION (provider);
+  session->clipboard_requested = TRUE;
+}
+
+static void
+clipboard_provider_iface_init (ClipboardProviderInterface *iface) {
+  iface->can_request = clipboard_can_request;
+  iface->is_enabled = clipboard_is_enabled;
+  iface->requested = clipboard_requested;
 }
 
 static void
